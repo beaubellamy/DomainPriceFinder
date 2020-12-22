@@ -57,14 +57,15 @@ def remove_times(df, pattern):
 
     df['time_in_price'] = df['listing.priceDetails.displayPrice'].str.findall(pattern)
 
-    if sum(df['time_in_price'].isnull()) == 0:
+    if sum(df['time_in_price'].str[0].isnull()) == 0:
         df.drop(['time_in_price'], axis=1, inplace=True)
         return df
 
     # Replace the time in the display price
     mask = ~df['time_in_price'].str[0].isnull()
-    df.loc[mask, 'listing.priceDetails.displayPrice'] = \
-        df[mask]['listing.priceDetails.displayPrice'].str.replace(df['time_in_price'][df[mask].index[0]][0],'')
+    if sum(mask) > 0:
+        df.loc[mask, 'listing.priceDetails.displayPrice'] = \
+            df[mask]['listing.priceDetails.displayPrice'].str.replace(df['time_in_price'][df[mask].index[0]][0],'')
 
     df.drop(['time_in_price'], axis=1, inplace=True)
 
@@ -73,23 +74,72 @@ def remove_times(df, pattern):
 
 def extend_numbers(df, pattern, delimiter=' '):
 
-    df['alt'] = df['listing.priceDetails.displayPrice'].str.findall(pattern, flags=re.IGNORECASE)    
+    df['alt'] = df['listing.priceDetails.displayPrice'].str.findall(pattern, flags=re.IGNORECASE)#.str[0].str.lower()   
+
+    if sum(df['alt'].str[0].isnull()) == df.shape[0]:
+        df.drop(['alt'], axis=1, inplace=True)
+        return df
+    
+    df['float_value'] = df['alt'].str[0].str.split(delimiter).str[0].astype(float)*1e6
+    #df['float_value'] = df['alt'].str.split(delimiter).str[0].astype(float)*1e6
+    df['replace_value'] = df['float_value'].fillna(0).astype(int)
+    df.loc[df['alt'].isnull(), 'alt'] = ''
+
+    for idx, row in df.iterrows():
+
+        if row['alt']:
+            extend_number = row['listing.priceDetails.displayPrice'].lower().replace(row['alt'][0],str(row[f'replace_value']))
+            df.loc[idx, 'listing.priceDetails.displayPrice'] = extend_number
+
+    df.drop(['alt', 'float_value', 'replace_value'], axis=1, inplace=True)
+    
+    return df
+
+def extend_numbers2(df, pattern, delimiter=' '):
+
+    df['alt'] = df['listing.priceDetails.displayPrice'].str.findall(pattern, flags=re.IGNORECASE)#.str[0].str.lower()   
 
     if sum(df['alt'].str[0].isnull()) == df.shape[0]:
         df.drop(['alt'], axis=1, inplace=True)
         return df
 
-    df['float_value'] = df['alt'].str[0].str.split(delimiter).str[0].astype(float)*1e6
+    if delimiter == 'k':
+        multiplier = 1e3
+    elif delimiter == 'm':
+        multiplier = 1e6
+    else:
+        multiplier = 1
+        # 214, 221, 282, 422
+    #df['float_value'] = df['alt'].str[0].str.split(delimiter).str[0].astype(float)*1e6
+    df['float_value'] = df['alt'].str[0].str.split(delimiter).str[0].astype(float)*multiplier
     df['replace_value'] = df['float_value'].fillna(0).astype(int)
-    
+    df.loc[df['alt'].isnull(), 'alt'] = ''
+
     for idx, row in df.iterrows():
 
         if row['alt']:
-            extend_number = row['listing.priceDetails.displayPrice'].replace(row['alt'][0],str(row[f'replace_value']))
+            extend_number = row['listing.priceDetails.displayPrice'].replace(row['alt'][0],str(row['replace_value']))
             df.loc[idx, 'listing.priceDetails.displayPrice'] = extend_number
 
     df.drop(['alt', 'float_value', 'replace_value'], axis=1, inplace=True)
     
+    return df
+
+
+def remove_phone_numbers(df):
+
+    # Remove phone numbers
+    pattern = '\d{4} \d{3} \d{3}'
+    df['phone_number'] = df['listing.priceDetails.displayPrice'].str.findall(pattern)
+
+    # Replace the date in the display price
+    for idx, row in df.iterrows():
+        if row['phone_number']:
+            phone_number = row['listing.priceDetails.displayPrice'].replace(row['phone_number'][0],'')
+            df.loc[idx, 'listing.priceDetails.displayPrice'] = phone_number
+
+    df.drop('phone_number', axis=1, inplace=True)
+
     return df
 
 
@@ -110,9 +160,15 @@ def listing_prices(filename):
     df.loc[(null_price & display_is_number), 'listing.priceDetails.price'] = \
         df[null_price & display_is_number]['listing.priceDetails.displayPrice']
 
+    df['listing.priceDetails.displayPrice'] = df['listing.priceDetails.displayPrice'].str.lower()
+
+    #361???? --> 15000001510000, 377,627
+    # Remove the agent phone numbers
+    df = remove_phone_numbers(df)
+
     # Replace the time and date parts of the display price before finding the price, so the numbers are only price
     # Remove the numbers related to time
-    time_pattern = '[0-9]{1,2}\.[0-9]{1,2}[ap]'
+    time_pattern = '\d{1,2}\.\d{1,2}[ap]'
     df = remove_times(df, time_pattern)
 
     time_pattern = '\d:\d{2}' # 2:30-3:00pm
@@ -138,39 +194,49 @@ def listing_prices(filename):
     pattern = '\d{2,4}\w2'
     df = remove_dates(df, pattern)
 
+    pattern = r'(\d{1,3}k)'
+    df = extend_numbers2(df, pattern, delimiter='k')
+    df = extend_numbers2(df, pattern, delimiter='k') # accounts for '$900k - $950k
+
+    pattern = r'(\d{1,3} k)'
+    df = extend_numbers2(df, pattern, delimiter='k')
+
     pattern = r'(\d{1}.{1,3} mill)'
     df = extend_numbers(df, pattern)
 
-    pattern = r'\d{1,2} mill'
+    pattern = r'\d{1,3} mill'
     df = extend_numbers(df, pattern)
 
-    pattern = r'\d.\d{1,2}M$'
-    df = extend_numbers(df, pattern, delimiter='M')
+    pattern = r'\d.\d{1,3}m$'
+    df = extend_numbers(df, pattern, delimiter='m')
+
+    df = extend_numbers(df, pattern, delimiter='m') # accounts for $1.1m - $1.2m
 
     # Create clean price features
-    df['displayPrice'] = df['listing.priceDetails.displayPrice'].str.findall(r'([0-9-]{1,3})').str.join(sep='')
+    df['listing.priceDetails.displayPrice'] = df['listing.priceDetails.displayPrice'].str.replace(',','')
+    df['displayPrice'] = df['listing.priceDetails.displayPrice'].str.findall('\d{1,7}')
 
     df['fromPrice'] = df['listing.priceDetails.priceFrom']
     df['toPrice'] = df['listing.priceDetails.priceTo']
 
     # Seperate clean prices
-    df.loc[null_price, 'fromPrice'] = df[null_price]['displayPrice'].str.split('-').str[0]
-    df.loc[null_price, 'toPrice'] = df[null_price]['displayPrice'].str.split('-').str[1]
+    df.loc[null_price, 'fromPrice'] = df[null_price]['displayPrice'].str[0]#.split('-').str[0]
+    df.loc[null_price, 'toPrice'] = df[null_price]['displayPrice'].str[1]#.split('-').str[1]
 
     null_toPrice = df['toPrice'].isnull()
     df.loc[null_toPrice, 'toPrice'] = df[null_toPrice]['fromPrice']
 
-    empty_price = df['toPrice'] == ''
-    df.loc[empty_price, 'toPrice'] = df[empty_price]['fromPrice']
+    #empty_price = df['toPrice'] == ''
+    #df.loc[empty_price, 'toPrice'] = df[empty_price]['fromPrice']
 
-    empty_price = df['fromPrice'] == ''
-    df.loc[empty_price, 'fromPrice'] = df[empty_price]['toPrice']
+    #empty_price = df['fromPrice'] == ''
+    #df.loc[empty_price, 'fromPrice'] = df[empty_price]['toPrice']
 
     df['toPrice'] = pd.to_numeric(df['toPrice'])
     df['fromPrice'] = pd.to_numeric(df['fromPrice'])
 
-    df.loc[df['toPrice'] < 1000, 'toPrice'] = np.nan
-    df.loc[df['fromPrice'] < 1000, 'fromPrice'] = np.nan
+    df.loc[df['toPrice'] <= 1200, 'toPrice'] = np.nan
+    df.loc[df['fromPrice'] <= 1200, 'fromPrice'] = np.nan
 
     df.to_csv(filename)
 
@@ -180,9 +246,12 @@ def listing_prices(filename):
 def validate_post_request(url,  token , post_payload, credentials):
 
     auth = {"Authorization":"Bearer "+token['access_token']}
-    request = requests.post(url, headers=auth, json=post_payload)
+    request = requests.post(url, headers=auth, json=post_payload) #------
     
     #token=request.json()
+    while request.status_code == 504:
+        time.sleep(3600)
+        request = requests.post(url, headers=auth, json=post_payload)
 
     # check for status.
     if request.status_code == 429:
@@ -209,8 +278,8 @@ def validate_post_request(url,  token , post_payload, credentials):
                             'Raised after getting a new access token')
     
     if request.status_code != 200:
-        raise Exception(request.json()['errors'], request.json()['message'], 
-                        'Raised after getting a new access token')
+        print (f'{request.json()["errors"]}: {request.json()["message"]} Raised after getting a new access token')
+        return "Failed", token
 
     return request, token
 
@@ -256,6 +325,10 @@ def validate_get_request(url, token, credentials):
         if request.status_code != 200:
             raise Exception(request.json()['errors'], request.json()['message'], 
                             'Raised after getting a new access token')
+    
+    elif request.status_code == 404:
+        print(f'{url} not found')
+        return 'Not Found', token
 
     if request.status_code != 200:
         raise Exception(request.json()['errors'], request.json()['message'], 
@@ -361,6 +434,9 @@ def find_price_range(token, property_id, lowerBoundPrice, UpperBoundPrice, incre
     auth = {"Authorization":"Bearer "+token['access_token']}
     request, token = validate_get_request(url, token, credentials)
     #request = requests.get(url,headers=auth)
+    
+    if request == 'Not Found':
+        return None, 0, 0, token
 
     details=request.json()
 
@@ -368,9 +444,9 @@ def find_price_range(token, property_id, lowerBoundPrice, UpperBoundPrice, incre
         date = details['saleDetails']['soldDetails']['soldDate']
         price = details['saleDetails']['soldDetails']['soldPrice']
 
-        remaining = remaining_calls(request)
+        #remaining = remaining_calls(request)
 
-        return int(remaining), date, price, price, token
+        return date, price, price, token
 
     # Get the property details
     address=details['addressParts']
@@ -404,6 +480,9 @@ def find_price_range(token, property_id, lowerBoundPrice, UpperBoundPrice, incre
         #request = requests.post(url,headers=auth,json=post_fields)
         request, token = validate_post_request(url, token, post_fields, credentials)
 
+        if request == 'Failed':
+            return None, min_price, min_price, token
+
         continue_searching, min_price = check_for_listing(request, property_id, min_price, increment, True)
                
         #if continue_searching and min_price == UpperBoundPrice:
@@ -412,8 +491,8 @@ def find_price_range(token, property_id, lowerBoundPrice, UpperBoundPrice, incre
 
         if min_price == 5000000:
             # return early if the proces are too high
-            remaining = remaining_calls(request)
-            return int(remaining), None, min_price, min_price, token
+            #remaining = remaining_calls(request)
+            return None, min_price, min_price, token
 
     continue_searching=True
     UpperBoundPrice = int(min_price*1.2)
@@ -432,6 +511,9 @@ def find_price_range(token, property_id, lowerBoundPrice, UpperBoundPrice, incre
         post_fields = build_post_fields(details)
                 
         request, token = validate_post_request(url,  token, post_fields, credentials)
+        
+        if request == 'Failed':
+            return None, min_price, min_price, token
 
         continue_searching, max_price = check_for_listing(request, property_id, max_price, increment, False)
 
@@ -458,9 +540,9 @@ def find_price_range(token, property_id, lowerBoundPrice, UpperBoundPrice, incre
         print(f'Price range: ${min_price} - ${max_price}')
     print("URL:",details['seoUrl'])
 
-    remaining = remaining_calls(request)
+    #remaining = remaining_calls(request)
 
-    return int(remaining), None, min_price, max_price, token
+    return None, min_price, max_price, token
 
 
 if __name__ == '__main__':
@@ -482,7 +564,7 @@ if __name__ == '__main__':
     id_list = df[(df['fromPrice'].isnull()) | (df['toPrice'].isnull())]
     for idx, row in id_list.iterrows():
      
-        remaining, date, min_price, max_price, access_token = find_price_range(access_token, row['listing.id'], 500000, 2000000, 25000)
+        date, min_price, max_price, access_token = find_price_range(access_token, row['listing.id'], 500000, 2000000, 25000)
 
         df.loc[idx, 'listing.priceDetails.price'] = 'price search'
         df.loc[idx, 'listing.priceDetails.priceFrom'] = min_price
